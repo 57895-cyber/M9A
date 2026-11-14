@@ -126,21 +126,39 @@ class BalancedTaskEntry(CustomAction):
         # 「用上一个账号读写记录」这类问题，已经删掉。
         #
         # ⚠️ `RecordID` 的缓存**不能直接采信**：它只做一次 OCR，认错一个数字就会
-        # 多出一个永远用不到的账号桶，而用户很难察觉。所以：
+        # 多出一个永远用不到的账号桶，而用户很难察觉。所以无论缓存有没有值，
+        # **都走 `sample_uid()` 连续采样确认**。
         #
-        #   - 缓存为空 → 先回主页跑一次 `RecordId`（把画面带到主页，采样才有意义）；
-        #   - 无论缓存原本有没有值，**都走 `sample_uid()` 连续采样确认**。
-        #     缓存里的值只用来决定「要不要先导航」，不用来决定「UID 是什么」。
+        # ⚠️ **采样前必须无条件回主页**，不能因为缓存有值就跳过导航。
+        # 采样读的是主页左上角那行 `ID:xxxx`，而入口链路里
+        # `DepotMaintainInit` / `BF_ResetRecords` / `BF_Entry` 都没有回家步骤 ——
+        # 不能假定任务开始时游戏停在主页。若此时画面在别处：
+        #
+        #   采样读不到 → uid 为空 → 走「情况 3」直接进 BF_Plan
+        #   → `is_task_skipped(uid)` 永远不会执行
+        #   → **已停用的账号被重新消耗体力**
+        #
+        # 代价是每次运行多一次回主页；但省掉它换来的是「可能绕过停用判断」，不值得。
         #
         # 采样规则（每轮 3 次、间隔 1 秒）：第一轮全一致直接采信，否则读满 6 次
         # 并要求全部一致 —— 5:1、4:2 都算读不到。
-        need_navigate = not current_uid()
-        if need_navigate:
-            _ensure_uid(context)
+        _ensure_uid(context)
 
         uid = sample_uid(context)
         if uid:
             _remember_uid(uid)
+        else:
+            # ⚠️ **采样失败时必须清掉缓存**。
+            #
+            # `_ensure_uid()` 刚把单次 OCR 的结果写进了 `RecordID.global_id`；
+            # 如果采样判定「不可信」，这个旧值还留着的话，后续 `BF_Plan` →
+            # `DepotMaintainPlan.run` 会通过 `current_account_id()` 读到它，
+            # 用**未确认的账号**去查关卡记录、选库存快照桶 ——
+            # 与「情况 3 不使用未确认账号」的约定矛盾。
+            #
+            # 清空后 `current_account_id()` 返回空串，`depot_maintain` 已有的
+            # 「账号未知 → 不读不写」路径会自然接管。
+            _remember_uid("")
 
         from .balanced_fallback import planner
 
@@ -185,10 +203,14 @@ class BalancedTaskEntry(CustomAction):
 
 
 def _remember_uid(uid: str) -> None:
-    """把采样得到的 UID 写进 `RecordID` 的缓存，供本任务后续读取。
+    """把 UID 写进 `RecordID` 的缓存；传空串表示**清空**。
 
     `RecordID` 在两张模块图里各有一份；按 `sys.modules` 找到已加载的那份再写，
     避免重复 import 触发「Custom name is already registered」。
+
+    清空是「采样判定不可信」时的必要动作：`_ensure_uid()` 会把单次 OCR 的结果
+    写进缓存，而采样可能判定它不可信；此时必须清掉，否则后续 `BF_Plan` →
+    `DepotMaintainPlan.run` 会拿这个未确认的值去查记录、选快照桶。
     """
     import sys
 
@@ -200,7 +222,10 @@ def _remember_uid(uid: str) -> None:
         if record_id is None:
             continue
         record_id.global_id = uid
-        logger.debug(f"采样得到的 UID 已写入 RecordID 缓存: {uid}")
+        if uid:
+            logger.debug(f"采样得到的 UID 已写入 RecordID 缓存: {uid}")
+        else:
+            logger.debug("采样未确认 UID，已清空 RecordID 缓存")
         return
 
 
