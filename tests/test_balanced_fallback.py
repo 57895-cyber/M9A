@@ -153,6 +153,23 @@ def _isolated_state(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPa
         monkeypatch.setattr(module, "BALANCED_STATE_PATH", path)
     reset_planner()
     yield
+    # ⚠️ `RecordID.global_id` 是**类变量**，`_remember_uid()` 会把它设成本用例的
+    # UID。不清掉的话，后续文件（如 test_warehouse_inventory）会用它当快照桶键，
+    # 拿不到 `__default__` 桶 → KeyError。这里必须复位。
+    _reset_record_id()
+
+
+def _reset_record_id() -> None:
+    """把 `RecordID` 的缓存清空（它是类变量，跨用例共享）。"""
+    for name in ("agent.custom.action.record_id", "custom.action.record_id"):
+        module = sys.modules.get(name)
+        if module is None:
+            continue
+        record_id = getattr(module, "RecordID", None)
+        if record_id is None:
+            continue
+        record_id.global_id = ""
+        record_id.global_user_name = ""
 
 
 # ------------------------------------------------------------- 候选关卡顺序
@@ -793,6 +810,7 @@ def test_entry_skips_task_when_marked(tmp_path: Path, monkeypatch: pytest.Monkey
     account = TEST_UID
     set_task_skipped(account, True)
     monkeypatch.setattr(balanced_entry, "current_uid", lambda: account)
+    monkeypatch.setattr(balanced_entry, "sample_uid", lambda ctx: account)
 
     context = _FakeContext()
     result = balanced_entry.BalancedTaskEntry().run(context, _FAKE_ARGV)
@@ -802,11 +820,58 @@ def test_entry_skips_task_when_marked(tmp_path: Path, monkeypatch: pytest.Monkey
     assert context.run_tasks == [], "UID 已缓存时不应再导航"
 
 
+def test_entry_skips_only_after_uid_is_confirmed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """停用标记只用**采样确认后**的 UID 判断，不用缓存里的单次 OCR 值。
+
+    回归防护（CodeRabbit）：`RecordID` 只做一次 OCR，认错一个数字就会把记录写进
+    错误的桶、或用错误账号的停用标记跳过。所以入口必须走 `sample_uid()`，
+    缓存里的值只决定「要不要先导航」。
+
+    这里让缓存里是一个**已被停用**的旧值，而采样得到的是另一个**未停用**的账号：
+    正确的实现会按采样结果照常刷取（BF_Plan），而不是被旧值误导跳过。
+    """
+    stale = "STALE-CACHED-UID"
+    set_task_skipped(stale, True)
+
+    context = _FakeContext()
+    monkeypatch.setattr(balanced_entry, "current_uid", lambda: stale)
+    monkeypatch.setattr(balanced_entry, "sample_uid", lambda ctx: TEST_UID)
+
+    result = balanced_entry.BalancedTaskEntry().run(context, _FAKE_ARGV)
+
+    assert result.success is True
+    assert context.next_overrides[-1][1] == ["BF_Plan"], (
+        "必须按采样确认的 UID 判断停用标记，不能采信缓存里的单次 OCR 值"
+    )
+
+
+def test_entry_skips_when_sampled_uid_is_marked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """采样确认的 UID 确实被停用 → 跳过，且**不截图**。
+
+    回归防护：停用是稳态路径（标记持久化，每次调度都走到），截图会无限堆积。
+    """
+    set_task_skipped(TEST_UID, True)
+
+    context = _FakeContext()
+    monkeypatch.setattr(balanced_entry, "current_uid", lambda: TEST_UID)
+    monkeypatch.setattr(balanced_entry, "sample_uid", lambda ctx: TEST_UID)
+    shots: list[str] = []
+    monkeypatch.setattr(balanced_entry, "save_debug_screenshot", lambda ctx, tag: shots.append(tag))
+
+    result = balanced_entry.BalancedTaskEntry().run(context, _FAKE_ARGV)
+
+    assert result.success is True
+    assert context.next_overrides[-1][1] == ["BF_Skipped"]
+    assert shots == [], "停用跳过是稳态路径，不该每次都存截图"
+
+
 def test_entry_navigates_once_to_read_uid(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """UID 未知时，入口回主页读一次（这是「按真实账号分桶」的前提）。
 
     回归防护：早前归属直接用 GUI 里手填的掩码文本，手工换号后仍沿用旧账号记录。
     """
+    # 采样本身另有单测（tests/test_uid_sampler.py），这里只测入口分支
+    monkeypatch.setattr(balanced_entry, "sample_uid", lambda ctx: TEST_UID)
     calls: list[str] = []
     cache: list[str] = [""]  # 模拟 RecordID 缓存：一开始为空
 
@@ -827,6 +892,8 @@ def test_entry_navigates_once_to_read_uid(tmp_path: Path, monkeypatch: pytest.Mo
 
 def test_entry_proceeds_when_not_marked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """未停用 → 放行。"""
+    # 采样本身另有单测（tests/test_uid_sampler.py），这里只测入口分支
+    monkeypatch.setattr(balanced_entry, "sample_uid", lambda ctx: TEST_UID)
     monkeypatch.setattr(balanced_entry, "current_uid", lambda: "100000001")
     context = _FakeContext()
     result = balanced_entry.BalancedTaskEntry().run(context, _FAKE_ARGV)
@@ -863,6 +930,8 @@ def test_reset_without_option_keeps_records(tmp_path: Path) -> None:
 
 def test_reset_then_entry_order_allows_reset_while_skipped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """已停用时仍能执行重置：重置在停用检查之前。"""
+    # 采样本身另有单测（tests/test_uid_sampler.py），这里只测入口分支
+    monkeypatch.setattr(balanced_entry, "sample_uid", lambda ctx: TEST_UID)
     account = TEST_UID
     set_task_skipped(account, True)
 
@@ -888,6 +957,7 @@ def test_skip_flag_persists_across_restart(tmp_path: Path, monkeypatch: pytest.M
     fresh.account_id = TEST_UID
     assert fresh.account_id == TEST_UID
     monkeypatch.setattr(balanced_entry, "current_uid", lambda: account)
+    monkeypatch.setattr(balanced_entry, "sample_uid", lambda ctx: account)
     context = _FakeContext()
     balanced_entry.BalancedTaskEntry().run(context, _FAKE_ARGV)
     assert context.next_overrides[-1][1] == ["BF_Skipped"]

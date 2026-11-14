@@ -13,7 +13,7 @@
         ]
     },
     "StageLookupFarLeft": {
-        "desc": "均衡刷材料：确认扫描已经滑到本章第一关（原版 TheFarLeftOfStageList 同一判定）。**默认禁用**，只有均衡刷材料任务启用。它记录一个标记，供 StageLookupTimeout 区分「整章扫完仍没找到」和「Swipe 动作偶发失败」。",
+        "desc": "均衡刷材料：确认扫描已经滑到本章第一关（原版 TheFarLeftOfStageList 同一判定）。**默认禁用**，只有均衡刷材料任务启用。命中即说明整章扫完且目标关卡确实没解锁 → 直接进 StageLookupTimeout 记录并顺延。**不回滚到右侧**：顺延分支自己会回主界面，右滑纯属多余，而且那条 Swipe 动作失败时会经 on_error 误记关卡不可用。",
         "enabled": false,
         "recognition": {
             "type": "Custom",
@@ -22,7 +22,7 @@
             }
         },
         "next": [
-            "SwipeRightForStageList"
+            "StageLookupTimeout"
         ]
     },
     "StageLookupTimeout": {

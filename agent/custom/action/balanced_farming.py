@@ -176,7 +176,11 @@ class BalancedFarmingAnalyze(CustomAction):
             # 这里复用原版共享的回家链（与 StageLookupTimeout 换候选前的做法一致）。
             detail = context.run_task(HOME_ENTRY)
             if detail is None or detail.status.failed:
-                logger.warning("跳过均衡任务前未能回到主界面，请检查游戏当前界面")
+                # 回不了主页就不能「假装成功」：BF_Skipped 不导航，直接跳过去会让游戏
+                # 留在仓库页，后续任务从错误界面开始且没有任何错误提示。
+                # 这里如实返回失败，与 `DepotMaintainDone` 回主页失败时的处理一致。
+                logger.error("跳过均衡任务前未能回到主界面，本次按失败结束（避免把游戏留在仓库页）")
+                return CustomAction.RunResult(success=False)
             context.override_next(ANALYZE_NODE, [SKIPPED_NODE])
             return CustomAction.RunResult(success=True)
 

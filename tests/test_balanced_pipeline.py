@@ -231,3 +231,26 @@ def test_no_stale_stage_progress_references() -> None:
         if re.search(r"stage_progress|stage_probe|StageProgressReset|StageProbe", text):
             stale.append(str(path.relative_to(root)))
     assert not stale, f"仍有旧设计的残留引用: {stale}"
+
+
+def test_far_left_node_wired_before_original(combat: dict[str, Any]) -> None:
+    """StageLookupFarLeft 接在左向扫描头里，且排在原版判定**之前**。
+
+    排在前面是为了先置位 `reached_far_left` 再让原版节点接管 —— 原版节点命中后
+    会回 `SwipeRightForStageList`，两者行为一致，只是多记一个标记。
+    """
+    nxt = combat["SwipeLeftAndFindStage"]["next"]
+    assert "StageLookupFarLeft" in nxt
+    assert "TheFarLeftOfStageList" in nxt
+    assert nxt.index("StageLookupFarLeft") < nxt.index("TheFarLeftOfStageList")
+
+
+def test_far_left_node_disabled_by_default(fallback: dict[str, Any]) -> None:
+    """两个自定义识别默认 disabled，避免拖累所有作战任务。
+
+    它们都是 Custom 识别，MaaFW 会为它们强制截图并回调 agent；而
+    `StageLookupBudget` 被插在两个扫描尾节点的 next 首位、`StageLookupFarLeft`
+    插在左向扫描头里，默认启用会让**所有作战任务**每轮都多付这份开销。
+    """
+    assert fallback["StageLookupBudget"]["enabled"] is False
+    assert fallback["StageLookupFarLeft"]["enabled"] is False

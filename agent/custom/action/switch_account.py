@@ -132,12 +132,17 @@ class SwitchAccountSelect(CustomAction):
         return context.tasker.controller.post_screencap().wait().get()
 
     def _remember_target(self, configured_target: str, selected_text: str) -> None:
-        """记下这次切换的目标标识（**仅用于日志**）。
+        """记下这次切换的目标（**仅用于日志**）。
 
-        账号归属现在只认游戏内真实 UID，不再需要把这个标识写进状态文件，
-        所以这里只打一条 debug 日志，方便排查「切到了哪个账号」。
+        账号归属现在只认游戏内真实 UID，不再需要把这个标识写进状态文件。
+
+        ⚠️ **只打掩码后的文本**：`configured_target` 来自 GUI，玩家可能填完整
+        手机号，原样写进 DEBUG 日志（`debug/custom/*.log` 会落盘）等于泄露号码。
+        列表里的 `selected_text` 是游戏显示的掩码形式（`189****6002`），用它就够了。
         """
-        logger.debug(f"切换目标标识: {configured_target or '未配置'}（列表中选中的行: {selected_text}）")
+        logger.debug(
+            f"切换目标: {selected_text or '未识别到选中行'}（GUI 配置了目标: {'是' if configured_target else '否'}）"
+        )
 
     def _read_rows(self, context: Context, img: Any) -> list[_AccountRow]:
         """读取账号行：一次 OCR 直接得到行文本与行位置，不再依赖 × 图标模板。"""

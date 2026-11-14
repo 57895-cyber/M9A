@@ -581,7 +581,10 @@ class StageLookupTimeout(CustomAction):
             # 跳过分支保持同一做法。
             detail = context.run_task(HOME_ENTRY)
             if detail is None or detail.status.failed:
-                logger.warning("跳过均衡任务前未能回到主界面，请检查游戏当前界面")
+                # 回不了主页就不能「假装成功」：BF_Skipped 不导航，跳过去会把游戏
+                # 留在关卡列表页，后续任务从错误界面开始且没有任何错误提示。
+                logger.error("跳过均衡任务前未能回到主界面，本次按失败结束（避免把游戏留在关卡列表页）")
+                return CustomAction.RunResult(success=False)
             context.override_next(TIMEOUT_NODE, [SKIPPED_NODE])
             return CustomAction.RunResult(success=True)
 
@@ -607,10 +610,14 @@ class StageLookupTimeout(CustomAction):
                 context.override_next(TIMEOUT_NODE, [])
                 return CustomAction.RunResult(success=False)
 
-        # 回主界面：原导航依赖主界面的「进入」按钮，停在关卡页时它认不出来
+        # 回主界面：原导航依赖主界面的「进入」按钮，停在关卡页时它认不出来。
+        # 回不去就不能继续 —— 后续 `Combat` 从主界面开始导航，停在关卡页会直接失败，
+        # 而且会把这次顺延的目标关卡记成「找不到」（实际根本没扫到）。
         detail = context.run_task(HOME_ENTRY)
         if detail is None or detail.status.failed:
-            logger.warning("顺延到下一候选前未能回到主界面")
+            logger.error("顺延到下一候选前未能回到主界面，本次按失败结束（避免从错误界面开始选关）")
+            context.override_next(TIMEOUT_NODE, [])
+            return CustomAction.RunResult(success=False)
 
         # 只改 stage / level 两个字段。
         # ⚠️ MaaFW 的覆盖对 `attach` 是**叠加合并**、对**末端键**整体替换

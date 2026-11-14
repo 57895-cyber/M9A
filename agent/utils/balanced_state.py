@@ -1,26 +1,28 @@
-"""均衡刷材料：逻辑账号的「关卡不可用」记录与「跳过均衡任务」停用标记。
+"""均衡刷材料：账号的「关卡不可用」记录与「跳过均衡任务」标记。
 
-## 为什么按「逻辑账号」而不是真实 UID
+## 账号归属：只认游戏内真实 UID
 
-本模块**不做任何账号识别**：不 OCR UID、不逐章探测、不为确认账号额外回主页。
-账号归属按任务执行上下文确定（用户明确指定的简化假设）：
+记录按**游戏内真实 UID** 分桶（`RecordID` 在主界面 OCR 的结果，由
+`BalancedTaskEntry` 连续采样确认后传进来）。本模块不做任何账号识别，
+也不回落任何默认值：
 
-- 最近一次**执行成功**的「切换账号」任务切到的账号，就是当前逻辑账号；
-- 没有切换账号任务时，默认始终是同一个账号（固定默认标识 `default`）；
-- 切换任务尚未执行或执行失败时，**不**提前改变归属；
-- 在游戏里手工换号不自动识别 —— 手工换号后的旧状态由用户在 GUI 里显式重置。
+- 没有「最近一次切换账号任务切到的账号」这种推断；
+- 没有固定默认标识；
+- 不读、也不写状态文件里的「当前账号」字段（该字段已随旧设计一起删除）。
 
-因此不同切换目标各自保留一套记录与停用标记，切回之前的账号继续沿用它那份。
+`account_id` 为空（调用方没读到 UID）时，读写函数一律按「没有记录」处理：
+`unavailable_stages` / `is_task_skipped` 返回空集 / `False`，
+`record_unavailable` / `set_task_skipped` 不写盘并返回 `False`。
+这样「读不到 UID」就只是本次运行不落盘，不会污染任何账号的桶。
 
 ## 记录内容
 
-只存必要信息：逻辑账号标识、不可用的主线关卡、是否跳过均衡任务。
+只存必要信息：不可用的主线关卡、是否跳过均衡任务。
 
 ```json
 {
-    "current_account": "189****6002",
     "accounts": {
-        "189****6002": {
+        "100123456": {
             "updated_at": "2026-11-07 10:00:00",
             "unavailable": {"7-26": "2026-11-07 10:00:00"},
             "skip_balanced": true
@@ -28,6 +30,10 @@
     }
 }
 ```
+
+`skip_balanced` 是**持久**标记：该 UID 的所有候选关卡都试过并失败后写入，
+之后该账号的均衡任务会直接跳过。玩家推进主线后到 GUI 勾「重置记录」即可解除
+（`clear_all` 清空全部记录与标记）。
 
 ## 关卡不可用边界
 
@@ -283,11 +289,20 @@ def account_bucket(data: dict[str, Any], account_id: str | None = None) -> dict[
     """取逻辑账号的状态桶，必要时就地建好。
 
     **复用 `account_store.get_account_bucket`** —— 与仓库快照（`warehouse_snapshot`）
-    走同一份分桶实现，好处是两套文件的分桶行为保证一致，并且自动获得旧格式迁移
-    （早期版本把字段直接放在根上，会整体搬进当前账号桶，避免升级后既有记录被当成
-    别的账号的数据）。
+    走同一份分桶实现，好处是两套文件的分桶行为保证一致。
+
+    ⚠️ **旧格式迁移必须先做**，不能只靠 `get_account_bucket` 内部那条分支：
+    它的迁移条件是「`accounts` 里全是标量」，而旧文件**根本没有 `accounts` 键**，
+    于是它只会新建一个空桶，根级的 `skip_balanced` / `unavailable` 被永久忽略。
+    `warehouse_snapshot.snapshot_bucket()` 的写法是对的（键不存在时把根级整体搬进桶），
+    这里与它保持一致。
     """
     key = normalize_account_id(account_id) or DEFAULT_ACCOUNT_KEY
+    if STATE_KEY not in data:
+        # 旧格式：字段直接放在根上 → 整体搬进当前账号桶
+        legacy = dict(data)
+        data.clear()
+        data[STATE_KEY] = {key: legacy} if legacy else {}
     return get_account_bucket(data, STATE_KEY, key)
 
 
@@ -403,19 +418,18 @@ def set_task_skipped(
 
 
 def clear_all(path: Path | None = None) -> bool:
-    """清除**所有逻辑账号**的关卡不可用记录与均衡停用标记。
+    """清除**所有账号**的关卡不可用记录与均衡跳过标记。
 
     GUI「重置全部记录」用：用户明确要求「删除所有记录」，所以清的是所有账号的
-    不可用记录与停用标记，不是只清当前账号。
+    不可用记录与跳过标记，不是只清当前账号。
 
-    **当前逻辑账号标识保留** —— 它不是「记录」，只是「现在该用哪一份状态」的归属；
-    清掉它会让重置后的运行改用默认桶，而不是玩家实际在用的那个账号。
+    没有需要「保留」的字段了 —— 账号归属只认游戏内 UID，不再有「当前账号」记录。
     """
     target = _path(path)
     data = load_state(target)
     data[STATE_KEY] = {}
     # 复用原子写入（tmp + os.replace）：直接 write_text 若中途出错会留下半截文件，
-    # 下次 load_state 读到损坏内容会退化成空状态，连 current_account 都一起丢。
+    # 下次 load_state 读到损坏内容会退化成空状态。
     return save_state(data, target)
 
 

@@ -529,7 +529,13 @@ def _resolve_available_stage(
         # 顺延状态机没激活（例如库存保持直接选材的路径）：只用登记关卡
         return entry.stage.code, entry.level
 
-    known = unavailable_stages(state.account_id)
+    # ⚠️ 必须把**任务内**的失败关卡也并进来，和 `next_candidate` 保持一致。
+    #
+    # `record_unavailable` 在账号未知（读不到 UID）时会拒绝落盘并返回 False，
+    # 但 `mark_unavailable` 仍把它记进 `state.failed_stages`（内存）。
+    # 只读 `unavailable_stages()` 的话，库存保持补完一种材料后重新选关会**又选中
+    # 同一关卡**，再白等一轮两分钟超时 —— 每轮重复，直到 MAX_ROUNDS_PER_TASK。
+    known = unavailable_stages(state.account_id) | state.failed_stages
     for candidate in candidates_for_material(
         entry.item_id,
         level=entry.level,

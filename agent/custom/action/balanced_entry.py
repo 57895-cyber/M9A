@@ -125,20 +125,22 @@ class BalancedTaskEntry(CustomAction):
         # 早期版本还有一条「回落到状态文件里记的旧账号」的分支，那会带来
         # 「用上一个账号读写记录」这类问题，已经删掉。
         #
-        # `RecordID` 的缓存默认是空的（agent 刚启动时没有任何 OCR 结果），
-        # 此时先回主页跑一次 `RecordId`；缓存已有值就不再导航。
+        # ⚠️ `RecordID` 的缓存**不能直接采信**：它只做一次 OCR，认错一个数字就会
+        # 多出一个永远用不到的账号桶，而用户很难察觉。所以：
         #
-        # 然后连续采样 6 次（每轮 3 次、间隔 1 秒）：第一轮全一致直接采信，
-        # 否则读满 6 次并要求全部一致 —— 单次 OCR 认错一个数字就会多出一个
-        # 永远用不到的账号桶，而且用户很难察觉。
-        if not current_uid():
+        #   - 缓存为空 → 先回主页跑一次 `RecordId`（把画面带到主页，采样才有意义）；
+        #   - 无论缓存原本有没有值，**都走 `sample_uid()` 连续采样确认**。
+        #     缓存里的值只用来决定「要不要先导航」，不用来决定「UID 是什么」。
+        #
+        # 采样规则（每轮 3 次、间隔 1 秒）：第一轮全一致直接采信，否则读满 6 次
+        # 并要求全部一致 —— 5:1、4:2 都算读不到。
+        need_navigate = not current_uid()
+        if need_navigate:
             _ensure_uid(context)
 
-        uid = current_uid()
-        if not uid:
-            uid = sample_uid(context)
-            if uid:
-                _remember_uid(uid)
+        uid = sample_uid(context)
+        if uid:
+            _remember_uid(uid)
 
         from .balanced_fallback import planner
 
@@ -165,18 +167,19 @@ class BalancedTaskEntry(CustomAction):
         state.account_id = uid
 
         # (b) 该 UID 此前所有候选关卡都不可用 → 跳过整个任务
+        #
+        # **不截图**：这是稳态路径（标记持久化，每次调度都会走到这里），
+        # 截图会无限堆积且内容完全一样，没有排查价值。日志里说清原因就够了，
+        # 玩家推进主线后到 GUI 勾「重置记录」即可解除。
         if is_task_skipped(uid):
-            logger.info(
-                f"账号 {uid} 已被标记「跳过均衡刷材料任务」（此前所有参与材料的候选关卡都不可用），本次直接跳过"
+            logger.warning(
+                f"账号 {uid} 此前所有参与材料的候选关卡都不可用，本次跳过均衡刷材料任务。"
+                f"若主线进度已推进，请在 GUI 勾选「重置记录」后重跑一次以解除"
             )
-            save_debug_screenshot(context, "skipped")
             context.override_next(ENTRY_NODE, [SKIPPED_NODE])
             return CustomAction.RunResult(success=True)
 
         # (a) 有记录就按记录选关，没记录就用全部候选
-        context.override_next(ENTRY_NODE, [PLAN_NODE])
-        return CustomAction.RunResult(success=True)
-
         context.override_next(ENTRY_NODE, [PLAN_NODE])
         return CustomAction.RunResult(success=True)
 
